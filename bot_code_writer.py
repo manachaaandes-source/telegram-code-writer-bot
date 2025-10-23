@@ -6,9 +6,9 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from datetime import datetime
-from aiogram.types import FSInputFile
 
 # ----------------------------
 # 環境変数読み込み
@@ -23,6 +23,7 @@ OPENROUTER_API_KEY_2 = "sk-or-v1-85bc4ebafd6c41304a24a012de583690f0c486eb8db288e
 # ----------------------------
 user_model_choice = {}   # {user_id: "deepseek" or "openai"}
 user_lang_choice = {}    # {user_id: "python" etc.}
+user_length_choice = {}  # {user_id: "short" | "medium" | "long"}
 
 # ----------------------------
 # 共通関数
@@ -42,7 +43,7 @@ def call_openrouter_model(prompt: str, model: str, api_key: str):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3,
-        "max_tokens": 1200
+        "max_tokens": 1500
     }
     return requests.post(url, headers=headers, json=data, timeout=40)
 
@@ -75,6 +76,14 @@ def extract_code(text: str):
     return text.strip()
 
 # ----------------------------
+# ボタン定義
+# ----------------------------
+continue_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔁 続きのコードを生成", callback_data="continue_code")],
+    [InlineKeyboardButton(text="🆕 新しいテーマで生成", callback_data="new_code")]
+])
+
+# ----------------------------
 # Bot設定
 # ----------------------------
 bot = Bot(
@@ -90,9 +99,10 @@ dp = Dispatcher()
 async def cmd_start(message: types.Message):
     user_model_choice[message.from_user.id] = "deepseek"
     user_lang_choice[message.from_user.id] = "python"
+    user_length_choice[message.from_user.id] = "medium"
     await message.answer(
         "💡 コード生成ボットへようこそ！\n\n"
-        "✨ /help で使い方を確認できます。\n"
+        "✨ `/help` で使い方を確認できます。\n"
         "💬 現在のAIモデル: DeepSeek (Free)"
     )
 
@@ -103,14 +113,15 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = (
         "🧠 **利用可能コマンド一覧**\n\n"
-        "🔹 `/start` — ボットを初期化\n"
+        "🔹 `/start` — 初期化\n"
         "🔹 `/help` — この一覧を表示\n"
         "🔹 `/setmodel <deepseek|openai>` — 使用AIを変更\n"
-        "🔹 `/lang <言語>` — 出力言語を指定 (例: `/lang python`, `/lang javascript`)\n"
-        "🔹 `/file <プロンプト>` — コードを `.py` ファイルで送信\n"
-        "🔹 `/explain <コード>` — コードの意味を解説\n"
-        "🔹 `<通常メッセージ>` — コードをテキストで生成\n\n"
-        "💡 DeepSeek Free を優先使用し、失敗時は OpenAI に自動切替。"
+        "🔹 `/lang <言語>` — 出力言語を指定\n"
+        "🔹 `/length <short|medium|long>` — コード長設定\n"
+        "🔹 `/file <説明>` — コードをファイル出力\n"
+        "🔹 `/file_structure` — 推定ディレクトリ構成を出力\n"
+        "🔹 `/explain <コード>` — コード解説\n"
+        "💡 DeepSeek優先、失敗時はOpenAIに自動切替。"
     )
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -121,12 +132,12 @@ async def cmd_help(message: types.Message):
 async def cmd_setmodel(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("⚠️ 使用方法: `/setmodel deepseek` または `/setmodel openai`", parse_mode="Markdown")
+        await message.answer("⚠️ `/setmodel deepseek` または `/setmodel openai`", parse_mode="Markdown")
         return
 
     choice = args[1].strip().lower()
     if choice not in ["deepseek", "openai"]:
-        await message.answer("❌ 無効な指定です。\n選択肢: `deepseek` または `openai`", parse_mode="Markdown")
+        await message.answer("❌ 無効な指定です。 deepseek | openai", parse_mode="Markdown")
         return
 
     user_model_choice[message.from_user.id] = choice
@@ -139,12 +150,30 @@ async def cmd_setmodel(message: types.Message):
 async def cmd_lang(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("⚠️ 使用方法: `/lang python` や `/lang javascript` など", parse_mode="Markdown")
+        await message.answer("⚠️ `/lang python` や `/lang javascript` など", parse_mode="Markdown")
         return
 
     lang = args[1].strip().lower()
     user_lang_choice[message.from_user.id] = lang
     await message.answer(f"✅ 出力言語を **{lang}** に設定しました。", parse_mode="Markdown")
+
+# ----------------------------
+# /length
+# ----------------------------
+@dp.message(Command("length"))
+async def cmd_length(message: types.Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("⚠️ `/length short` | `/length medium` | `/length long`", parse_mode="Markdown")
+        return
+
+    length = args[1].strip().lower()
+    if length not in ["short", "medium", "long"]:
+        await message.answer("❌ 無効な指定。 short | medium | long", parse_mode="Markdown")
+        return
+
+    user_length_choice[message.from_user.id] = length
+    await message.answer(f"✅ コード長を **{length}** に設定しました。", parse_mode="Markdown")
 
 # ----------------------------
 # /explain
@@ -153,7 +182,7 @@ async def cmd_lang(message: types.Message):
 async def cmd_explain(message: types.Message):
     code_text = message.text.replace("/explain", "").strip()
     if not code_text:
-        await message.answer("⚠️ 例: `/explain <コード>`")
+        await message.answer("⚠️ `/explain <コード>` を入力してください。")
         return
 
     model_choice = user_model_choice.get(message.from_user.id, "deepseek")
@@ -164,55 +193,82 @@ async def cmd_explain(message: types.Message):
     await message.answer(f"💬 **解説:**\n{explanation}")
 
 # ----------------------------
+# /file_structure
+# ----------------------------
+@dp.message(Command("file_structure"))
+async def cmd_structure(message: types.Message):
+    model_choice = user_model_choice.get(message.from_user.id, "deepseek")
+    prompt = "一般的なWebアプリやAPI構成をPythonの例でフォルダ構成として説明してください。"
+    res = generate_code(prompt, model_choice)
+    await message.answer(f"📁 推定構成:\n{res}")
+
+# ----------------------------
 # /file
 # ----------------------------
 @dp.message(Command("file"))
 async def cmd_file(message: types.Message):
     prompt = message.text.replace("/file", "").strip()
     if not prompt:
-        await message.answer("⚠️ 例: /file PythonでQRコードを作るコード")
+        await message.answer("⚠️ `/file PythonでQRコードを作るコード` などを指定")
         return
 
-    model_choice = user_model_choice.get(message.from_user.id, "deepseek")
-    lang_choice = user_lang_choice.get(message.from_user.id, "python")
-    await message.answer(f"🧠 コード生成中（{model_choice}使用, 言語: {lang_choice})...")
+    user_id = message.from_user.id
+    model_choice = user_model_choice.get(user_id, "deepseek")
+    lang_choice = user_lang_choice.get(user_id, "python")
+    length_choice = user_length_choice.get(user_id, "medium")
 
-    prompt_with_lang = f"{prompt}\n出力は{lang_choice}で。コードだけを出力してください。"
-    code_raw = generate_code(prompt_with_lang, model_choice)
+    await message.answer(f"🧠 コード生成中…（{model_choice}, {lang_choice}, 長さ: {length_choice})")
+
+    prompt_full = f"{prompt}\n出力は{lang_choice}で。コードのみを出力。詳細度: {length_choice}"
+    code_raw = generate_code(prompt_full, model_choice)
     code = extract_code(code_raw)
 
-    filename = f"generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ 'js' if 'java' in lang_choice else 'py'}"
+    ext = "js" if "java" in lang_choice else "py"
+    filename = f"generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(code)
 
     document = FSInputFile(filename)
-    await message.reply_document(document, caption=f"✅ 生成コードです\nモデル: {model_choice}\n言語: {lang_choice}")
+    await message.reply_document(document, caption=f"✅ 生成コードです\nモデル: {model_choice}\n言語: {lang_choice}", reply_markup=continue_keyboard)
 
 # ----------------------------
 # 通常メッセージ（コード生成）
 # ----------------------------
 @dp.message()
 async def handle_message(message: types.Message):
+    user_id = message.from_user.id
     user_text = message.text.strip()
-    model_choice = user_model_choice.get(message.from_user.id, "deepseek")
-    lang_choice = user_lang_choice.get(message.from_user.id, "python")
+    model_choice = user_model_choice.get(user_id, "deepseek")
+    lang_choice = user_lang_choice.get(user_id, "python")
+    length_choice = user_length_choice.get(user_id, "medium")
 
-    await message.answer(f"🧠 コード生成中...（{model_choice}, 言語: {lang_choice})")
+    await message.answer(f"🧠 コード生成中…（{model_choice}, 言語: {lang_choice}, 長さ: {length_choice})")
 
-    prompt_with_lang = f"{user_text}\n出力は{lang_choice}で。コードだけを出力してください。"
-    code_raw = generate_code(prompt_with_lang, model_choice)
+    prompt_full = f"{user_text}\n出力は{lang_choice}で。コードのみを出力。詳細度: {length_choice}"
+    code_raw = generate_code(prompt_full, model_choice)
     code = extract_code(code_raw)
 
     try:
-        await message.answer(f"✅ 結果:\n```\n{code}\n```")
+        await message.answer(f"✅ 結果:\n```\n{code}\n```", reply_markup=continue_keyboard)
     except Exception:
-        await message.answer("✅ 結果:\n" + code)
+        await message.answer("✅ 結果:\n" + code, reply_markup=continue_keyboard)
+
+# ----------------------------
+# ボタンコールバック
+# ----------------------------
+@dp.callback_query(lambda c: c.data == "continue_code")
+async def cb_continue(callback: types.CallbackQuery):
+    await callback.message.answer("🔁 続きのコード内容を入力してください！")
+
+@dp.callback_query(lambda c: c.data == "new_code")
+async def cb_new(callback: types.CallbackQuery):
+    await callback.message.answer("🆕 新しいテーマのコード内容を入力してください！")
 
 # ----------------------------
 # メイン実行
 # ----------------------------
 async def main():
-    print("🤖 Telegram Bot (DeepSeek↔OpenAI + /lang + /explain + /help強化) 起動中...")
+    print("🤖 Telegram Bot v2.5 起動中...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
